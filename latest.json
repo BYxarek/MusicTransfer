@@ -1,10 +1,10 @@
 {
-  "version": "2.3.0-alpha.4",
-  "notes": "Удаление записей истории и улучшенная проверка капчи после добавления трека.",
+  "version": "2.3.0-alpha.5",
+  "notes": "Прямое чтение плейлистов Яндекс Музыки и перенос через официальный API SoundCloud.",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.4/MusicTransfer-2.3.0-alpha.4-x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YnhnVENLY3VxZTdySnY2SnlFdTNZdmtkZVdESDZWSnBsVWZjVEpEcUZnSTZ2VStFWnltRUxhQXg3TjVPZ3hKcUw4a2RVYkpCc0RmOTJUcm5jc0hqc0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzI2Nzg5CWZpbGU6TXVzaWNUcmFuc2ZlciBBbHBoYV8yLjMuMC1hbHBoYS40X3g2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS40CkFEV3lWVE1JcnBmQXNTZEJBaEpGVkp6RS9WREJyMWJGZUxlNStvckFxN3BsWkVGd1ZZTXpxMXljd2JhQTk1dDZHQmhGK1U2WU0wVGVEaFVCRjdLNEF3PT0K"
+      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.5/MusicTransfer-2.3.0-alpha.5-x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YnpTcXFReW9Ka0NCUy95M2FTejJEUVdhSEpHSzA1cEFEcjhzb3A2TFMwNFExRmZNczRoTjl0VWdKeVg1VE94V0hRVmpML1JFcURvVVloM0FUS1JFK1FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzQwMDY1CWZpbGU6TXVzaWNUcmFuc2Zlci0yLjMuMC1hbHBoYS41LXg2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS41Ck1DaWhhVCt5ams4bnNRY1daN3RYSXBUUkUveEhYSVVkMGkvK0ttMXJpY0VYd3pqUXZsamhwVmJlSzdSKzQ4U2tXa2NsYTBVRHR5ZUM0aG8vdjdBcEJBPT0K"
     }
   }
 }
