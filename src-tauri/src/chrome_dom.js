@@ -54,11 +54,20 @@
     captcha() {
       const host = /(^|\.)(captcha-delivery\.com|smartcaptcha\.yandexcloud\.net)$|^captcha-api\.yandex\./i;
       if (host.test(location.hostname) || /\/showcaptcha(?:\/|$)/i.test(location.pathname)) return true;
-      if (all("iframe[src]").some(frame => visible(frame) &&
-        (host.test(new URL(frame.src, location.href).hostname) ||
-         /captcha challenge|проверка безопасности/i.test(frame.title)))) return true;
-      const hint = /verify (that )?you are (a )?human|slide.{0,40}(right|puzzle)|подтвердите.{0,30}вы не робот|передвиньте.{0,25}ползунок|перетащите.{0,25}ползунок/i;
-      return all('h1,h2,[role="heading"]').some(heading => visible(heading) && hint.test(text(heading)));
+      const frameHint = /captcha challenge|security challenge|проверка безопасности/i;
+      if (all("iframe").some(frame => {
+        if (!visible(frame) || frame.getBoundingClientRect().height < 30) return false;
+        if (frameHint.test(frame.title)) return true;
+        try {
+          return host.test(new URL(frame.getAttribute("src") || frame.dataset.src || "", location.href).hostname);
+        } catch {
+          return false;
+        }
+      })) return true;
+      const hint = /verify (that )?you are (a )?human|(?:slide|drag|move) (?:the )?(?:slider|puzzle piece).{0,35}(?:right|puzzle|complete)|slide.{0,40}to the right|подтвердите.{0,30}вы не робот|(?:передвиньте|сдвиньте|перетащите).{0,25}ползунок/i;
+      return all('h1,h2,h3,p,label,span,div,[role="heading"],[role="alert"]').some(element =>
+        (element.childElementCount === 0 || element.matches('h1,h2,h3,[role="heading"],[role="alert"]')) &&
+        hint.test(element.textContent) && visible(element));
     },
     source() {
       const tracks = all('a[href*="/track/"]').map(anchor => {

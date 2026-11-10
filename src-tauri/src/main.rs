@@ -23,6 +23,26 @@ struct Desktop {
     updating: AtomicBool,
 }
 
+fn lock_transfer_files() -> Result<std::fs::File> {
+    let path = report::data_dir()?;
+    std::fs::create_dir_all(&path)
+        .map_err(|error| format!("Не удалось подготовить папку переноса: {error}"))?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.join("transfer.lock"))
+        .map_err(|error| format!("Не удалось открыть файл блокировки переноса: {error}"))?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => {
+            "Перенос уже запущен в другой копии MusicTransfer.".into()
+        }
+        std::fs::TryLockError::Error(error) => format!("Не удалось заблокировать перенос: {error}"),
+    })?;
+    Ok(lock)
+}
+
 #[tauri::command]
 fn start_transfer(
     app: AppHandle,
@@ -37,22 +57,7 @@ fn start_transfer(
     if active.is_some() {
         return Err("Перенос уже запущен.".into());
     }
-    let lock_path = report::data_dir()?;
-    std::fs::create_dir_all(&lock_path)
-        .map_err(|error| format!("Не удалось подготовить папку переноса: {error}"))?;
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path.join("transfer.lock"))
-        .map_err(|error| format!("Не удалось открыть файл блокировки переноса: {error}"))?;
-    lock.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => {
-            "Перенос уже запущен в другой копии MusicTransfer.".into()
-        }
-        std::fs::TryLockError::Error(error) => format!("Не удалось заблокировать перенос: {error}"),
-    })?;
+    let lock = lock_transfer_files()?;
     let control = Arc::new(Control::new());
     *active = Some(control.clone());
     let mut job = Job::new(request, control.clone(), events.clone(), state.log.clone());
@@ -103,6 +108,20 @@ fn transfer_history(state: State<'_, Desktop>) -> Result<Vec<Summary>> {
         state.log.write("WARNING", &warning);
     }
     Ok(entries)
+}
+
+#[tauri::command]
+fn delete_transfer_history(state: State<'_, Desktop>, id: String) -> Result<()> {
+    let active = state.active.lock().unwrap();
+    if active.is_some() {
+        return Err("Остановите перенос перед удалением истории.".into());
+    }
+    let _lock = lock_transfer_files()?;
+    report::delete(&id)?;
+    state
+        .log
+        .write("INFO", &format!("Удалена запись истории {id}."));
+    Ok(())
 }
 
 #[tauri::command]
@@ -280,6 +299,7 @@ fn main() {
             reply_transfer,
             stop_transfer,
             transfer_history,
+            delete_transfer_history,
             skipped_tracks,
             added_tracks,
             transfer_report,

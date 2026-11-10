@@ -100,9 +100,29 @@ struct Validation {
     invalid: bool,
 }
 
+#[derive(Debug)]
 pub enum SaveFailure {
+    Challenge,
     Rejected(String),
     Unknown(String),
+}
+
+struct NetworkResponse {
+    id: RequestId,
+    url: String,
+    status: u16,
+    challenge: bool,
+}
+
+fn challenge_response(status: u16, headers: &Value) -> bool {
+    headers.as_object().is_some_and(|headers| {
+        headers.iter().any(|(name, value)| {
+            (name.eq_ignore_ascii_case("cf-mitigated") && value.as_str() == Some("challenge"))
+                || (status == 403
+                    && name.eq_ignore_ascii_case("x-datadomeresponse")
+                    && value.as_str() == Some("403"))
+        })
+    })
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -213,7 +233,7 @@ pub struct Chrome {
     request_stream: EventStream<EventRequestWillBeSent>,
     response_stream: EventStream<EventResponseReceived>,
     requests: VecDeque<(RequestId, String, String)>,
-    responses: VecDeque<(RequestId, String, u16)>,
+    responses: VecDeque<NetworkResponse>,
 }
 
 impl Chrome {
@@ -330,11 +350,12 @@ impl Chrome {
                 self.responses.pop_front();
             }
             if let Ok(status) = u16::try_from(event.response.status) {
-                self.responses.push_back((
-                    event.request_id.clone(),
-                    event.response.url.clone(),
+                self.responses.push_back(NetworkResponse {
+                    id: event.request_id.clone(),
+                    url: event.response.url.clone(),
                     status,
-                ));
+                    challenge: challenge_response(status, event.response.headers.inner()),
+                });
             }
         }
     }
@@ -367,8 +388,9 @@ impl Chrome {
     }
 
     fn search_http_error(&self, url: &str) -> Option<SearchFailure> {
-        self.responses.iter().find_map(|(_, address, status)| {
-            (address == url && *status >= 400).then_some(SearchFailure::Http(*status))
+        self.responses.iter().find_map(|response| {
+            (response.url == url && response.status >= 400)
+                .then_some(SearchFailure::Http(response.status))
         })
     }
 
@@ -729,10 +751,18 @@ impl Chrome {
         .ok_or_else(|| "SoundCloud не подтвердил удаление. Проверьте плейлист вручную.".into())
     }
 
-    pub fn save(&mut self, part: &Part) -> std::result::Result<(), SaveFailure> {
+    pub fn save(
+        &mut self,
+        part: &Part,
+        check: &impl Fn() -> Result<()>,
+    ) -> std::result::Result<(), SaveFailure> {
         let created = part.created;
         let url = part.url.as_deref().and_then(report::canonical_url);
         let args = [json!(part.name), json!(created), json!(url)];
+        check().map_err(SaveFailure::Unknown)?;
+        if self.captcha().map_err(SaveFailure::Unknown)? {
+            return Err(SaveFailure::Challenge);
+        }
         self.reset_network();
         if !self
             .dom::<bool>("save", &args)
@@ -742,55 +772,79 @@ impl Chrome {
                 "SoundCloud не показал кнопку сохранения.".into(),
             ));
         }
-        let until = Instant::now() + Duration::from_secs(20);
-        loop {
-            let state: SaveState = self.dom("saveState", &args).map_err(SaveFailure::Unknown)?;
-            let captcha = self.captcha().map_err(SaveFailure::Unknown)?;
-            if let Some(status) = self.save_status(created) {
-                if matches!(status, 200 | 201 | 204) {
-                    return Ok(());
-                }
-                if status >= 400 {
+        let mut observed = None;
+        self.wait(Duration::from_secs(20), check, |chrome| {
+            if chrome.captcha()? {
+                return Ok(Some(Err(SaveFailure::Challenge)));
+            }
+            let (sent, response) = chrome.save_network(created);
+            if response.is_some_and(|response| response.challenge) {
+                return Ok(Some(Err(SaveFailure::Challenge)));
+            }
+            if sent && response.is_none() {
+                observed = None;
+                return Ok(None);
+            }
+            let status = response.map(|response| response.status);
+            let outcome = match status {
+                Some(200 | 201 | 204) => Some(Ok(())),
+                Some(status @ 400..) => {
                     let message =
                         format!("SoundCloud вернул HTTP {status} при сохранении плейлиста.");
-                    return Err(
-                        if (400..500).contains(&status) && !matches!(status, 408 | 409) {
+                    Some(Err(
+                        if (400..500).contains(&status) && !matches!(status, 403 | 408 | 409 | 429)
+                        {
                             SaveFailure::Rejected(message)
                         } else {
                             SaveFailure::Unknown(message)
                         },
-                    );
+                    ))
                 }
+                _ => {
+                    let state: SaveState = chrome.dom("saveState", &args)?;
+                    if (!created && state.state == "hidden") || (created && state.state == "added")
+                    {
+                        Some(Ok(()))
+                    } else {
+                        chrome
+                            .dom::<Option<Validation>>("validation", &[])?
+                            .map(|validation| {
+                                let message =
+                                    format!("Ошибка формы SoundCloud: {}", validation.message);
+                                Err(if validation.invalid {
+                                    SaveFailure::Rejected(message)
+                                } else {
+                                    SaveFailure::Unknown(message)
+                                })
+                            })
+                    }
+                }
+            };
+            let Some(outcome) = outcome else {
+                observed = None;
+                return Ok(None);
+            };
+            // The button and HTTP response can change before SoundCloud renders the challenge.
+            let (previous_status, since) = observed.get_or_insert_with(|| (status, Instant::now()));
+            if *previous_status != status {
+                (*previous_status, *since) = (status, Instant::now());
             }
-            if captcha {
-                return Err(SaveFailure::Unknown(
-                    "SoundCloud показал проверку после отправки.".into(),
-                ));
-            }
-            if (!created && state.state == "hidden") || (created && state.state == "added") {
-                return Ok(());
-            }
-            if let Some(validation) = self
-                .dom::<Option<Validation>>("validation", &[])
-                .map_err(SaveFailure::Unknown)?
-            {
-                let message = format!("Ошибка формы SoundCloud: {}", validation.message);
-                return Err(if validation.invalid {
-                    SaveFailure::Rejected(message)
-                } else {
-                    SaveFailure::Unknown(message)
-                });
-            }
-            if Instant::now() >= until {
-                return Err(SaveFailure::Unknown(
-                    "SoundCloud не подтвердил сохранение. Проверьте плейлист.".into(),
-                ));
-            }
-            thread::sleep(TICK);
-        }
+            let grace = if matches!(status, Some(403 | 429)) {
+                3
+            } else {
+                2
+            };
+            Ok((since.elapsed() >= Duration::from_secs(grace)).then_some(outcome))
+        })
+        .map_err(SaveFailure::Unknown)?
+        .unwrap_or_else(|| {
+            Err(SaveFailure::Unknown(
+                "SoundCloud не подтвердил сохранение. Проверьте плейлист.".into(),
+            ))
+        })
     }
 
-    fn save_status(&self, created: bool) -> Option<u16> {
+    fn save_network(&self, created: bool) -> (bool, Option<&NetworkResponse>) {
         let requests: HashSet<_> = self
             .requests
             .iter()
@@ -814,9 +868,14 @@ impl Chrome {
                 .then_some(id)
             })
             .collect();
-        self.responses
+        let response = self
+            .responses
             .iter()
-            .find_map(|(id, _, status)| requests.contains(id).then_some(*status))
+            .enumerate()
+            .filter(|(_, response)| requests.contains(&response.id))
+            .max_by_key(|(index, response)| (response.challenge, *index))
+            .map(|(_, response)| response);
+        (!requests.is_empty(), response)
     }
 
     pub fn playlist_links(
@@ -884,6 +943,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn network_challenge_requires_explicit_signal() {
+        assert!(challenge_response(
+            403,
+            &json!({"X-DataDomeResponse": "403"})
+        ));
+        assert!(challenge_response(
+            403,
+            &json!({"Cf-Mitigated": "challenge"})
+        ));
+        assert!(!challenge_response(
+            403,
+            &json!({"cf-mitigated": "guardrails"})
+        ));
+        assert!(!challenge_response(429, &json!({"Retry-After": "10"})));
+    }
+
+    #[test]
     #[ignore = "requires an installed Google Chrome"]
     fn local_chrome_private_playlist_and_existing_playlist() {
         let profile = tempfile::tempdir().unwrap();
@@ -940,13 +1016,13 @@ mod tests {
                 .evaluate::<bool>(r#"document.querySelector('input[value="private"]').checked"#)
                 .unwrap()
         );
-        assert!(chrome.save(&part).is_ok());
+        assert!(chrome.save(&part, &|| Ok(())).is_ok());
         assert!(chrome.evaluate::<bool>(&set_fixture).unwrap());
         part.created = true;
         part.url = Some("https://soundcloud.com/test/sets/target".into());
         part.occupied = Some(499);
         assert!(!chrome.prepare(&candidate, &part, &|| Ok(())).unwrap());
-        assert!(chrome.save(&part).is_ok());
+        assert!(chrome.save(&part, &|| Ok(())).is_ok());
         let args = [json!(part.name), json!(part.url)];
         assert_eq!(
             chrome.dom::<String>("membership", &args).unwrap(),
@@ -960,6 +1036,30 @@ mod tests {
         );
         assert!(chrome.dom::<bool>("remove", &args).unwrap());
         assert_eq!(chrome.dom::<String>("membership", &args).unwrap(), "absent");
+        assert!(
+            chrome
+                .evaluate::<bool>(
+                    r#"(
+            window.addClicks = 0,
+            document.querySelector('#target').onclick = function () {
+                window.addClicks += 1;
+                this.innerText = 'Added';
+                setTimeout(() => {
+                    const prompt = document.createElement('div');
+                    prompt.textContent = 'Slide the slider to the right';
+                    document.body.append(prompt);
+                }, 500);
+            },
+            true
+        )"#
+                )
+                .unwrap()
+        );
+        assert!(matches!(
+            chrome.save(&part, &|| Ok(())),
+            Err(SaveFailure::Challenge)
+        ));
+        assert_eq!(chrome.evaluate::<u32>("window.addClicks").unwrap(), 1);
         assert!(chrome.evaluate::<bool>(&set_fixture).unwrap());
         assert!(
             chrome

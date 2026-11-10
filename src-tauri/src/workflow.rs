@@ -9,7 +9,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::Local;
@@ -233,13 +233,45 @@ impl Job {
         if !has_challenge {
             return Ok(false);
         }
-        loop {
-            self.action("Требуется проверка в Chrome",
+        self.wait_for_captcha(chrome, false)?;
+        Ok(true)
+    }
+
+    fn wait_for_captcha(&mut self, chrome: &mut Chrome, after_save: bool) -> Result<()> {
+        let (title, text) = if after_save {
+            (
+                "Проверка SoundCloud после добавления",
+                "Пройдите проверку в открытом Chrome. Если есть ползунок, передвиньте его вправо. Затем подтвердите, чтобы приложение проверило, добавился ли трек.",
+            )
+        } else {
+            (
+                "Требуется проверка в Chrome",
                 "Пройдите капчу в открытом окне Chrome. Если виден ползунок, передвиньте его вправо.",
-                &[("Проверка пройдена", "done")])?;
-            if !chrome.captcha()? {
-                self.log("INFO", "Проверка завершена. Продолжаю перенос.");
-                return Ok(true);
+            )
+        };
+        loop {
+            self.action(title, text, &[("Проверка пройдена", "done")])?;
+            let mut clear_since = None;
+            let cleared = chrome.wait(Duration::from_secs(4), &|| self.control.check(), |chrome| {
+                if chrome.captcha()? {
+                    return Ok(Some(false));
+                }
+                let since = clear_since.get_or_insert_with(Instant::now);
+                Ok((since.elapsed() >= Duration::from_millis(800)).then_some(true))
+            });
+            match cleared {
+                Ok(Some(true)) => {
+                    self.log("INFO", "Проверка завершена. Продолжаю перенос.");
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.control.check()?;
+                    if !chrome.disconnected() {
+                        return Err(error);
+                    }
+                    self.recover_chrome(chrome, chrome::SOUNDCLOUD, error)?;
+                }
             }
         }
     }
@@ -1086,11 +1118,10 @@ impl Job {
                     );
                 }
                 self.save_record()?;
-                if let Err(failure) = chrome.save(&part) {
+                if let Err(failure) = chrome.save(&part, &|| self.control.check()) {
                     match failure {
-                        SaveFailure::Unknown(error) => {
-                            self.log("WARNING", &error);
-                            self.check_unknown(chrome, error)?;
+                        SaveFailure::Challenge | SaveFailure::Unknown(_) => {
+                            self.check_unknown(chrome, failure)?;
                             self.reconcile(chrome, index)?;
                             if self.record.as_ref().unwrap().1.tracks[index]
                                 .result
@@ -1166,12 +1197,23 @@ impl Job {
         if reply == "retry" { Ok(()) } else { Err(error) }
     }
 
-    fn check_unknown(&mut self, chrome: &mut Chrome, error: String) -> Result<()> {
+    fn check_unknown(&mut self, chrome: &mut Chrome, failure: SaveFailure) -> Result<()> {
         self.control.check()?;
+        let error = match failure {
+            SaveFailure::Challenge => {
+                self.log(
+                    "WARNING",
+                    "SoundCloud запросил проверку после отправки. Добавление ожидает сверки.",
+                );
+                return self.wait_for_captcha(chrome, true);
+            }
+            SaveFailure::Unknown(error) | SaveFailure::Rejected(error) => error,
+        };
+        self.log("WARNING", &error);
         if chrome.disconnected() {
             return self.recover_chrome(chrome, chrome::SOUNDCLOUD, error);
         }
-        self.check_captcha(chrome).ok();
+        self.check_captcha(chrome)?;
         self.control.check()
     }
 
@@ -1359,7 +1401,7 @@ impl Job {
             };
             self.save_replacement(index, Some(&replacement))?;
             if !already_added {
-                match chrome.save(&part) {
+                match chrome.save(&part, &|| self.control.check()) {
                     Ok(()) => {
                         replacement.phase = ReplacementPhase::RemovePrevious;
                         self.save_replacement(index, Some(&replacement))?;
@@ -1369,7 +1411,7 @@ impl Job {
                         self.retry_action(chrome, "SoundCloud отклонил замену", error)?;
                         continue;
                     }
-                    Err(SaveFailure::Unknown(error)) => self.check_unknown(chrome, error)?,
+                    Err(failure) => self.check_unknown(chrome, failure)?,
                 }
             }
             return self.finish_replacement(chrome, index);

@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "music-transfer"
-version = "2.3.0-alpha.3"
+version = "2.3.0-alpha.4"
 dependencies = [
  "arboard",
  "chromiumoxide",

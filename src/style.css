@@ -186,6 +186,7 @@ input[type='checkbox'], input[type='radio'] { width: 16px; height: 16px; margin:
 .button:hover:not(:disabled) { background: var(--hover); }
 .button.primary { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+.button.danger:not(:disabled) { color: var(--error); border-color: var(--error); }
 .button:disabled { color: var(--muted); background: var(--subtle); border-color: var(--line); }
 .preferences { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 11px; }
 summary { color: var(--muted); cursor: pointer; font-weight: 650; }
@@ -289,6 +290,8 @@ td .tag { padding: 4px 6px; }
 .history-detail { margin-top: 14px; }
 .history-detail > div:first-child { overflow-wrap: anywhere; margin-bottom: 9px; }
 .history-detail p { margin-top: 3px; }
+.history-delete { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.history-delete .row { margin-top: 8px; }
 .history-actions, .actions { align-items: stretch; }
 .actions { margin-top: 14px; }
 .link-list { display: grid; flex: 1 0 100%; gap: 6px; }

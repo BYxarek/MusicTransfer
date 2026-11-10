@@ -606,6 +606,28 @@ pub fn resolve(id: &str) -> Result<PathBuf> {
         .ok_or_else(|| "Отчёт не найден.".into())
 }
 
+pub fn delete(id: &str) -> Result<()> {
+    delete_from(id, folders()?)
+}
+
+fn delete_from(id: &str, folders: Vec<PathBuf>) -> Result<()> {
+    report_date(id).ok_or("Некорректное имя отчёта.")?;
+    // A legacy copy beside the EXE would otherwise reappear under the same ID.
+    for folder in folders.into_iter().rev() {
+        match fs::remove_file(folder.join(id)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Не удалось удалить отчёт из {}: {error}",
+                    folder.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn read(path: &Path) -> Result<Report> {
     let bytes = fs::read(path).map_err(|error| format!("Не удалось прочитать отчёт: {error}"))?;
     let mut report: Report =
@@ -713,6 +735,24 @@ fn same_part(left: &Part, right: &Part) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_deletion_removes_both_copies_of_one_report() {
+        let current = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        let folders = vec![current.path().to_owned(), legacy.path().to_owned()];
+        let id = "перенос-20261109-222224-076520.json";
+        let keep = "перенос-20261109-222225-076520.json";
+        for folder in &folders {
+            fs::write(folder.join(id), b"report").unwrap();
+            fs::write(folder.join(keep), b"other report").unwrap();
+        }
+        assert!(delete_from(&format!("../{id}"), folders.clone()).is_err());
+        assert!(folders.iter().all(|folder| folder.join(id).is_file()));
+        delete_from(id, folders.clone()).unwrap();
+        assert!(folders.iter().all(|folder| !folder.join(id).exists()));
+        assert!(folders.iter().all(|folder| folder.join(keep).is_file()));
+    }
 
     #[test]
     fn old_report_and_atomic_update() {

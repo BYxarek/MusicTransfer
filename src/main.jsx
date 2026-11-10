@@ -4,7 +4,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import {
   Activity, ArrowLeft, ArrowRight, AudioLines, Check, ChevronRight, ClipboardPaste,
   Cloud, Download, ExternalLink, FileText, History, Link, ListMusic, LucideProvider, Moon, Music2, RotateCcw,
-  Search, SkipForward, Square, Sun, Terminal, Volume2,
+  Search, SkipForward, Square, Sun, Terminal, Trash2, Volume2,
 } from 'lucide-react';
 import { version } from '../package.json';
 import './style.css';
@@ -187,19 +187,25 @@ function PlaylistLinks({ links, command }) {
   </>;
 }
 
-function HistoryPage({ rows, loaded, selected, select, refresh, busy, start, skipped, added, openDetails, command, notify }) {
+function HistoryPage({ rows, loaded, selected, select, refresh, busy, start, skipped, added, openDetails, command, notify, deleteHistory }) {
   const entry = rows.find(row => row.id === selected);
+  const [confirmId, setConfirmId] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  function choose(id) {
+    setConfirmId(null);
+    select(id);
+  }
   return <section className="card">
     <div className="section-head">
       <div><h2>История переносов</h2><p>Сохранённые отчёты Яндекс Музыки и плейлисты SoundCloud</p></div>
-      <Button icon={RotateCcw} onClick={refresh}>Обновить</Button>
+      <Button icon={RotateCcw} disabled={deleting} onClick={refresh}>Обновить</Button>
     </div>
     {rows.length ? <div className="table-wrap"><table>
       <thead><tr><th>Плейлист</th><th>Дата</th><th>Добавлено</th><th>Статус</th></tr></thead>
       <tbody>{rows.map(row => <tr key={row.id} className={selected === row.id ? 'selected' : ''}
-        onClick={() => select(row.id)}>
+        onClick={() => !deleting && choose(row.id)}>
         <td><button type="button" className="table-pick" aria-pressed={selected === row.id}
-          onClick={event => { event.stopPropagation(); select(row.id); }}>{row.title || 'Без названия'}</button></td>
+          disabled={deleting} onClick={event => { event.stopPropagation(); choose(row.id); }}>{row.title || 'Без названия'}</button></td>
         <td>{row.date}</td><td>{row.added} из {row.total}</td><td><span className="tag">{row.status}</span></td>
       </tr>)}</tbody>
     </table></div> : <div className="empty"><History size={28} />
@@ -207,7 +213,7 @@ function HistoryPage({ rows, loaded, selected, select, refresh, busy, start, ski
     {entry && <div className="history-detail" aria-label="Действия для выбранного переноса">
       <div><strong>{entry.title}</strong><p>{reportCounts(entry)}</p></div>
       <div className="row history-actions">
-        <Button icon={ArrowRight} kind="primary" disabled={busy || !entry.resumable}
+        <Button icon={ArrowRight} kind="primary" disabled={busy || deleting || !entry.resumable}
           onClick={() => start({ id: entry.id })}>Продолжить перенос</Button>
         <Button icon={ListMusic} onClick={() => skipped(entry)}>Пропущенные треки</Button>
         <Button icon={Check} onClick={() => added(entry)} disabled={!entry.added}>Добавленные треки</Button>
@@ -216,8 +222,25 @@ function HistoryPage({ rows, loaded, selected, select, refresh, busy, start, ski
         <Button icon={Link} onClick={async () => {
           if (await command('copy_link', { id: entry.id })) notify('Ссылка на Яндекс Музыку скопирована.');
         }}>Скопировать ссылку</Button>
+        <Button icon={Trash2} kind="danger" disabled={busy || deleting}
+          onClick={() => setConfirmId(entry.id)}>Удалить из истории</Button>
         <PlaylistLinks key={entry.id} links={entry.links} command={command} />
       </div>
+      {confirmId === entry.id && <div className="history-delete" role="group" aria-label="Подтверждение удаления">
+        <p><strong>Удалить «{entry.title || 'Без названия'}» из истории?</strong> Локальный отчёт будет удалён, и продолжить этот перенос будет нельзя. Плейлисты на музыкальных сервисах сохранятся.</p>
+        <div className="row">
+          <Button autoFocus disabled={deleting} onClick={() => setConfirmId(null)}>Отмена</Button>
+          <Button icon={Trash2} kind="danger" disabled={busy || deleting} onClick={async () => {
+            setDeleting(true);
+            try {
+              await deleteHistory(entry.id);
+              setConfirmId(null);
+            } finally {
+              setDeleting(false);
+            }
+          }}>{deleting ? 'Удаляю…' : 'Удалить отчёт'}</Button>
+        </div>
+      </div>}
     </div>}
   </section>;
 }
@@ -473,6 +496,19 @@ function App() {
     refreshHistory();
   }
 
+  async function deleteHistory(id) {
+    setProblem('');
+    setNotice('');
+    if (await command('delete_transfer_history', { id })) {
+      if (state.report?.id === id) {
+        setState({ kind: 'ready' });
+        setProgress(emptyProgress);
+      }
+      setNotice('Запись удалена из истории.');
+    }
+    await refreshHistory();
+  }
+
   async function showSkipped(entry) {
     try {
       const rows = await invoke('skipped_tracks', { id: entry.id });
@@ -624,7 +660,7 @@ function App() {
       </div>}
       {page === 'history' && <HistoryPage rows={entries} loaded={loaded} selected={selected}
         select={setSelected} refresh={refreshHistory} busy={busy} start={start} skipped={showSkipped} added={showAdded}
-        openDetails={showReport} command={command} notify={setNotice} />}
+        openDetails={showReport} command={command} notify={setNotice} deleteHistory={deleteHistory} />}
       {page === 'report' && <ReportPage key={reportView.entry.id} {...reportView} busy={busy} back={historyPage}
         start={start} command={command} notify={setNotice} error={error} />}
       {page === 'skipped' && <SkippedPage key={skipView.entry.id} {...skipView} busy={busy} back={historyPage}
