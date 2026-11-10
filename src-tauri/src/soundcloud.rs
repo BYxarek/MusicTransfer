@@ -499,7 +499,7 @@ impl SoundCloud {
         check: &impl Fn() -> Result<()>,
     ) -> Result<Vec<String>> {
         let path = format!(
-            "/playlists/{}/tracks?linked_partitioning=true&limit=200",
+            "/playlists/{}/tracks?access=playable,preview,blocked&linked_partitioning=true&limit=200",
             playlist.urn
         );
         let tracks = self.pages::<Identity>(&path, check)?;
