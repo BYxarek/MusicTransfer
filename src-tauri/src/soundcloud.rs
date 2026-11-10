@@ -2,14 +2,16 @@ use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
+    sync::Mutex,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::{
     Method,
     blocking::{Client, Response},
+    header::{HeaderMap, LOCATION, RETRY_AFTER},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -18,7 +20,8 @@ use url::Url;
 
 use crate::{
     chrome::{
-        Candidate, Membership, PlaylistChoice, PlaylistDetails, SaveFailure, Search, SearchFailure,
+        Candidate, Membership, PlaylistChoice, PlaylistDetails, SEARCH_INTERVAL, SaveFailure,
+        Search, SearchFailure,
     },
     report::{self, LIMIT, Part, Result},
 };
@@ -28,6 +31,60 @@ const TOKEN: &str = "https://byxarek.site/music-transfer/soundcloud-token.php";
 const CLIENT_ID: &str = "FP6dwOtDaLJbs330tNedpX9CUoAGauBZ";
 const LOOPBACK: &str = "127.0.0.1:8766";
 const REDIRECT: &str = "http://127.0.0.1:8766/callback";
+const API_INTERVAL: Duration = Duration::from_millis(750);
+const DEFAULT_COOLDOWN: u64 = 60;
+
+#[derive(Default)]
+struct RateLimits {
+    api: Option<Instant>,
+    search: Option<Instant>,
+}
+
+// shortcut: this process tracks its own traffic, use a shared limiter to budget across installations.
+static RATE_LIMITS: Mutex<RateLimits> = Mutex::new(RateLimits {
+    api: None,
+    search: None,
+});
+
+impl RateLimits {
+    fn delay(&self, now: Instant, search: bool) -> Duration {
+        let deadline = if search {
+            self.api.max(self.search)
+        } else {
+            self.api
+        };
+        deadline.map_or(Duration::ZERO, |deadline| {
+            deadline.saturating_duration_since(now)
+        })
+    }
+
+    fn sent(&mut self, now: Instant, search: bool) {
+        self.api = self.api.max(Some(now + API_INTERVAL));
+        if search {
+            self.search = self.search.max(Some(now + SEARCH_INTERVAL));
+        }
+    }
+
+    fn observe(&mut self, headers: &HeaderMap, limited: bool, now: Instant, unix_now: u64) {
+        if !limited && seconds_header(headers, "x-ratelimit-remaining") != Some(0) {
+            return;
+        }
+        let reset = seconds_header(headers, "x-ratelimit-reset")
+            .filter(|&reset| reset >= unix_now)
+            .map(|reset| (reset - unix_now).saturating_add(1));
+        let retry_after = if limited {
+            seconds_header(headers, RETRY_AFTER.as_str())
+        } else {
+            None
+        };
+        let seconds = reset.max(retry_after).unwrap_or(DEFAULT_COOLDOWN);
+        let deadline = now
+            .checked_add(Duration::from_secs(seconds))
+            .unwrap_or(now + Duration::from_secs(DEFAULT_COOLDOWN));
+        // A search response can report the shared quota, so pause all API traffic.
+        self.api = self.api.max(Some(deadline));
+    }
+}
 
 #[derive(Deserialize)]
 struct Token {
@@ -81,6 +138,7 @@ pub struct SoundCloud {
     tracks: HashMap<String, String>,
     playlists: HashMap<String, String>,
     selected: Option<String>,
+    on_wait: Box<dyn Fn(u64)>,
 }
 
 fn api_url(url: &Url) -> bool {
@@ -106,11 +164,43 @@ fn complete_tracks(tracks: Vec<Identity>, count: usize) -> Result<Vec<String>> {
     Ok(tracks.into_iter().map(|track| track.urn).collect())
 }
 
+fn seconds_header(headers: &HeaderMap, name: &str) -> Option<u64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
 fn status(response: Response) -> std::result::Result<Response, SearchFailure> {
-    if response.status().is_success() {
-        Ok(response)
-    } else {
-        Err(SearchFailure::Http(response.status().as_u16()))
+    match response.status().as_u16() {
+        200..=299 => Ok(response),
+        429 => Err(SearchFailure::RateLimited(seconds_header(
+            response.headers(),
+            RETRY_AFTER.as_str(),
+        ))),
+        status => Err(SearchFailure::Http(status)),
+    }
+}
+
+fn playlist_request(
+    urn: Option<&str>,
+    name: &str,
+    sharing: &str,
+    tracks: &[String],
+) -> (Method, String, Value) {
+    let tracks: Vec<_> = tracks.iter().map(|urn| json!({"urn": urn})).collect();
+    match urn {
+        Some(urn) => (
+            Method::PUT,
+            format!("/playlists/{urn}"),
+            json!({"playlist": {"tracks": tracks}}),
+        ),
+        None => (
+            Method::POST,
+            "/playlists".to_owned(),
+            json!({"playlist": {
+                "title": name,
+                "sharing": sharing,
+                "tracks": tracks,
+            }}),
+        ),
     }
 }
 
@@ -189,19 +279,14 @@ fn receive(stream: &mut TcpStream, state: &str) -> Option<Result<String>> {
 }
 
 impl SoundCloud {
-    pub fn connect(check: &impl Fn() -> Result<()>) -> Result<Self> {
+    pub fn connect(
+        check: &impl Fn() -> Result<()>,
+        on_wait: impl Fn(u64) + 'static,
+    ) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() < 4
-                    && attempt.previous().iter().all(api_url)
-                    && api_url(attempt.url())
-                {
-                    attempt.follow()
-                } else {
-                    attempt.stop()
-                }
-            }))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .build()
             .map_err(|error| network(error).to_string())?;
         status(
@@ -264,8 +349,9 @@ impl SoundCloud {
             tracks: HashMap::new(),
             playlists: HashMap::new(),
             selected: None,
+            on_wait: Box::new(on_wait),
         };
-        let account: Identity = api.get("/me")?;
+        let account: Identity = api.get("/me", check)?;
         if !resource(&account.urn, "users") {
             return Err("SoundCloud не подтвердил аккаунт.".into());
         }
@@ -273,45 +359,108 @@ impl SoundCloud {
         Ok(api)
     }
 
+    fn wait_for_slot(&self, search: bool, check: &impl Fn() -> Result<()>) -> Result<()> {
+        let mut notified = false;
+        loop {
+            check()?;
+            let delay = RATE_LIMITS.lock().unwrap().delay(Instant::now(), search);
+            if delay.is_zero() {
+                return Ok(());
+            }
+            if !notified && delay >= Duration::from_secs(2) {
+                (self.on_wait)(delay.as_secs() + 1);
+                notified = true;
+            }
+            thread::sleep(delay.min(Duration::from_millis(200)));
+        }
+    }
+
     fn request(
         &mut self,
-        method: Method,
-        url: Url,
-        body: Option<&Value>,
+        mut method: Method,
+        mut url: Url,
+        mut body: Option<&Value>,
+        check: &impl Fn() -> Result<()>,
     ) -> std::result::Result<Response, SearchFailure> {
         if !api_url(&url) {
             return Err(SearchFailure::Unconfirmed);
         }
-        if Instant::now() >= self.expires {
-            self.token = exchange(
-                &self.http,
-                json!({
-                    "grant_type": "refresh_token", "refresh_token": self.token.refresh_token,
-                }),
-            )
-            .map_err(SearchFailure::Browser)?;
-            self.expires =
-                Instant::now() + Duration::from_secs(self.token.expires_in.saturating_sub(60));
+        let mut redirects = 0;
+        loop {
+            let search = method == Method::GET
+                && matches!(url.path(), "/tracks" | "/search" | "/search/tracks");
+            self.wait_for_slot(search, check)
+                .map_err(SearchFailure::Browser)?;
+            if Instant::now() >= self.expires {
+                self.token = exchange(
+                    &self.http,
+                    json!({
+                        "grant_type": "refresh_token", "refresh_token": self.token.refresh_token,
+                    }),
+                )
+                .map_err(SearchFailure::Browser)?;
+                self.expires =
+                    Instant::now() + Duration::from_secs(self.token.expires_in.saturating_sub(60));
+            }
+            let mut request = self
+                .http
+                .request(method.clone(), url.clone())
+                .header(
+                    "Authorization",
+                    format!("OAuth {}", self.token.access_token),
+                )
+                .header("Accept", "application/json");
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            check().map_err(SearchFailure::Browser)?;
+            RATE_LIMITS.lock().unwrap().sent(Instant::now(), search);
+            let response = request.send().map_err(network)?;
+            let code = response.status().as_u16();
+            let unix_now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            RATE_LIMITS.lock().unwrap().observe(
+                response.headers(),
+                code == 429,
+                Instant::now(),
+                unix_now,
+            );
+            // Resolve redirects within the same API host, pacing each HTTP request.
+            if redirects < 3
+                && matches!(code, 301 | 302 | 303 | 307 | 308)
+                && let Some(location) = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                && let Ok(next) = url.join(location)
+                && api_url(&next)
+            {
+                if code == 303 || (matches!(code, 301 | 302) && method == Method::POST) {
+                    if method != Method::HEAD {
+                        method = Method::GET;
+                    }
+                    body = None;
+                }
+                redirects += 1;
+                url = next;
+                continue;
+            }
+            return status(response);
         }
-        let mut request = self
-            .http
-            .request(method, url)
-            .header(
-                "Authorization",
-                format!("OAuth {}", self.token.access_token),
-            )
-            .header("Accept", "application/json");
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        status(request.send().map_err(network)?)
     }
 
-    fn get<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
+    fn get<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        check: &impl Fn() -> Result<()>,
+    ) -> Result<T> {
         self.request(
             Method::GET,
             Url::parse(&format!("{API}{path}")).unwrap(),
             None,
+            check,
         )
         .and_then(|response| response.json().map_err(network))
         .map_err(|error| error.to_string())
@@ -333,7 +482,7 @@ impl SoundCloud {
             let url = Url::parse(&address)
                 .map_err(|_| "SoundCloud вернул неверную страницу.".to_owned())?;
             let page: Page<T> = self
-                .request(Method::GET, url, None)
+                .request(Method::GET, url, None, check)
                 .and_then(|response| response.json().map_err(network))
                 .map_err(|error| error.to_string())?;
             rows.extend(page.collection);
@@ -355,7 +504,7 @@ impl SoundCloud {
             ("linked_partitioning", "true"),
         ]);
         let page: Page<Recording> = self
-            .request(Method::GET, url, None)?
+            .request(Method::GET, url, None, check)?
             .json()
             .map_err(network)?;
         let missing = page.collection.is_empty();
@@ -389,20 +538,24 @@ impl SoundCloud {
         Ok(Search { missing, rows })
     }
 
-    fn resolve<T: DeserializeOwned>(&mut self, address: &str) -> Result<T> {
+    fn resolve<T: DeserializeOwned>(
+        &mut self,
+        address: &str,
+        check: &impl Fn() -> Result<()>,
+    ) -> Result<T> {
         let mut url = Url::parse(&format!("{API}/resolve")).unwrap();
         url.query_pairs_mut().append_pair("url", address);
-        self.request(Method::GET, url, None)
+        self.request(Method::GET, url, None, check)
             .and_then(|response| response.json().map_err(network))
             .map_err(|error| error.to_string())
     }
 
-    fn track_urn(&mut self, url: &str) -> Result<String> {
+    fn track_urn(&mut self, url: &str, check: &impl Fn() -> Result<()>) -> Result<String> {
         let url = report::track_url(url).ok_or("В отчёте отсутствует ссылка на трек.")?;
         if let Some(urn) = self.tracks.get(&url) {
             return Ok(urn.clone());
         }
-        let track: Identity = self.resolve(&url)?;
+        let track: Identity = self.resolve(&url, check)?;
         if !resource(&track.urn, "tracks") {
             return Err("SoundCloud не подтвердил идентификатор трека.".into());
         }
@@ -431,9 +584,9 @@ impl SoundCloud {
         let url = report::canonical_url(url).ok_or("В отчёте отсутствует ссылка на плейлист.")?;
         check()?;
         let playlist = if let Some(urn) = self.playlists.get(&url) {
-            self.get(&format!("/playlists/{urn}?show_tracks=false"))?
+            self.get(&format!("/playlists/{urn}?show_tracks=false"), check)?
         } else {
-            match self.resolve::<Playlist>(&url) {
+            match self.resolve::<Playlist>(&url, check) {
                 Ok(playlist) => playlist,
                 Err(error) => self
                     .owned_playlists(check)?
@@ -512,7 +665,7 @@ impl SoundCloud {
         part: &Part,
         check: &impl Fn() -> Result<()>,
     ) -> Result<bool> {
-        let track = self.track_urn(track)?;
+        let track = self.track_urn(track, check)?;
         let playlist = self.owned_playlist(
             part.url
                 .as_deref()
@@ -534,6 +687,7 @@ impl SoundCloud {
                     .url
                     .as_deref()
                     .ok_or("Нет ссылки на найденный трек.")?,
+                check,
             )?,
         );
         Ok(())
@@ -585,28 +739,25 @@ impl SoundCloud {
     fn write_playlist(
         &mut self,
         playlist: Option<&Playlist>,
-        name: &str,
+        part: &Part,
         tracks: &[String],
         check: &impl Fn() -> Result<()>,
     ) -> std::result::Result<Playlist, SaveFailure> {
         check().map_err(SaveFailure::Rejected)?;
-        let tracks_body: Vec<_> = tracks.iter().map(|urn| json!({"urn": urn})).collect();
-        let (method, path, body) = match playlist {
-            Some(playlist) => (
-                Method::PUT,
-                format!("/playlists/{}", playlist.urn),
-                json!({"tracks": tracks_body}),
-            ),
-            None => (
-                Method::POST,
-                "/playlists".to_owned(),
-                json!({"title": name, "sharing": "private", "tracks": tracks_body}),
-            ),
-        };
+        let sharing = playlist.map_or(if part.public { "public" } else { "private" }, |playlist| {
+            playlist.sharing.as_str()
+        });
+        let (method, path, body) = playlist_request(
+            playlist.map(|playlist| playlist.urn.as_str()),
+            &part.name,
+            sharing,
+            tracks,
+        );
         let result = self.request(
             method,
             Url::parse(&format!("{API}{path}")).unwrap(),
-            Some(&json!({"playlist": body})),
+            Some(&body),
+            check,
         );
         let saved: Playlist = result
             .map_err(|error| {
@@ -625,10 +776,8 @@ impl SoundCloud {
             .tracks
             .as_ref()
             .is_some_and(|items| items.iter().map(|track| &track.urn).eq(tracks.iter()));
-        if (playlist.is_none() && saved.sharing != "private")
-            || (playlist.is_some_and(|playlist| {
-                playlist.urn != saved.urn || playlist.sharing != saved.sharing
-            }))
+        if saved.sharing != sharing
+            || playlist.is_some_and(|playlist| playlist.urn != saved.urn)
             || saved.track_count != tracks.len()
             || (!confirmed
                 && self
@@ -678,7 +827,7 @@ impl SoundCloud {
             None
         };
         tracks.push(track);
-        let saved = self.write_playlist(playlist.as_ref(), &part.name, &tracks, check)?;
+        let saved = self.write_playlist(playlist.as_ref(), part, &tracks, check)?;
         part.url = Some(self.remember(&saved).map_err(SaveFailure::Unknown)?);
         part.occupied = Some(tracks.len() - 1);
         Ok(())
@@ -691,8 +840,8 @@ impl SoundCloud {
         part: &Part,
         check: &impl Fn() -> Result<()>,
     ) -> Result<()> {
-        let previous = self.track_urn(previous)?;
-        let replacement = self.track_urn(replacement)?;
+        let previous = self.track_urn(previous, check)?;
+        let replacement = self.track_urn(replacement, check)?;
         let playlist = self.owned_playlist(
             part.url
                 .as_deref()
@@ -707,7 +856,7 @@ impl SoundCloud {
         }
         if let Some(index) = tracks.iter().position(|urn| urn == &previous) {
             tracks.remove(index);
-            self.write_playlist(Some(&playlist), &part.name, &tracks, check)
+            self.write_playlist(Some(&playlist), part, &tracks, check)
                 .map_err(|failure| match failure {
                     SaveFailure::Rejected(error) | SaveFailure::Unknown(error) => error,
                     SaveFailure::Challenge => "SoundCloud запросил проверку.".into(),
@@ -720,6 +869,66 @@ impl SoundCloud {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spaces_api_and_search_requests_independently() {
+        let now = Instant::now();
+        let mut limits = RateLimits::default();
+        limits.sent(now, true);
+        assert_eq!(limits.delay(now, false), Duration::from_millis(750));
+        assert_eq!(limits.delay(now, true), Duration::from_millis(1250));
+
+        let next = now + Duration::from_millis(750);
+        limits.sent(next, false);
+        assert_eq!(limits.delay(next, true), Duration::from_millis(750));
+        assert_eq!(
+            limits.delay(next + Duration::from_millis(750), true),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn pauses_before_the_next_request_when_the_server_quota_is_empty() {
+        let now = Instant::now();
+        let mut limits = RateLimits::default();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "1".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "1045".parse().unwrap());
+        limits.observe(&headers, false, now, 1000);
+        assert_eq!(limits.delay(now, false), Duration::ZERO);
+
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        limits.observe(&headers, false, now, 1000);
+        assert_eq!(limits.delay(now, false), Duration::from_secs(46));
+        assert_eq!(limits.delay(now, true), Duration::from_secs(46));
+
+        headers.insert(RETRY_AFTER, "70".parse().unwrap());
+        limits.observe(&headers, true, now, 1000);
+        assert_eq!(limits.delay(now, true), Duration::from_secs(70));
+        assert_eq!(
+            limits.delay(now + Duration::from_secs(70), true),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn public_playlist_creation_and_update_send_the_ordered_tracks() {
+        let tracks = ["soundcloud:tracks:12".into(), "soundcloud:tracks:33".into()];
+        let expected = json!([{"urn": tracks[0]}, {"urn": tracks[1]}]);
+        let (method, path, body) = playlist_request(None, "Test", "public", &tracks);
+        assert_eq!(method, Method::POST);
+        assert_eq!(path, "/playlists");
+        assert_eq!(
+            body,
+            json!({"playlist": {"title": "Test", "sharing": "public", "tracks": expected}})
+        );
+
+        let (method, path, body) =
+            playlist_request(Some("soundcloud:playlists:1"), "Test", "public", &tracks);
+        assert_eq!(method, Method::PUT);
+        assert_eq!(path, "/playlists/soundcloud:playlists:1");
+        assert_eq!(body, json!({"playlist": {"tracks": expected}}));
+    }
 
     #[test]
     fn accepts_only_the_callback_with_one_matching_state() {

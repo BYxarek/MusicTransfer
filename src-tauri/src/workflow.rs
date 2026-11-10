@@ -33,7 +33,9 @@ const STOP: &str = "Перенос остановлен.";
 
 fn retry_delay(error: &SearchFailure, attempt: usize) -> Option<u64> {
     match error {
-        SearchFailure::Http(429) => [10, 25].get(attempt).copied(),
+        SearchFailure::RateLimited(retry_after) => [15, 60]
+            .get(attempt)
+            .map(|&fallback| retry_after.unwrap_or(fallback)),
         SearchFailure::Http(408 | 500..=599)
         | SearchFailure::Browser(_)
         | SearchFailure::Unconfirmed
@@ -62,8 +64,13 @@ mod tests {
     #[test]
     fn transient_search_failures_are_bounded() {
         assert_eq!(retry_delay(&SearchFailure::Http(503), 0), Some(2));
-        assert_eq!(retry_delay(&SearchFailure::Http(429), 1), Some(25));
-        assert_eq!(retry_delay(&SearchFailure::Http(429), 2), None);
+        assert_eq!(retry_delay(&SearchFailure::RateLimited(None), 0), Some(15));
+        assert_eq!(retry_delay(&SearchFailure::RateLimited(None), 1), Some(60));
+        assert_eq!(
+            retry_delay(&SearchFailure::RateLimited(Some(90)), 1),
+            Some(90)
+        );
+        assert_eq!(retry_delay(&SearchFailure::RateLimited(Some(90)), 2), None);
         assert_eq!(retry_delay(&SearchFailure::Http(403), 0), None);
     }
 }
@@ -285,7 +292,7 @@ impl Job {
     }
 
     fn pause(&self, seconds: u64) -> Result<()> {
-        for _ in 0..seconds * 5 {
+        for _ in 0..seconds.saturating_mul(5) {
             self.control.check()?;
             thread::sleep(Duration::from_millis(200));
         }
@@ -361,17 +368,19 @@ impl Job {
                 Err(error) => error,
             };
             self.control.check()?;
-            if chrome.disconnected() {
-                self.recover_destination(chrome, chrome::SOUNDCLOUD, error.to_string())?;
-                attempt = 0;
-                continue;
+            let rate_limited = matches!(error, SearchFailure::RateLimited(_));
+            if !rate_limited {
+                if chrome.disconnected() {
+                    self.recover_destination(chrome, chrome::SOUNDCLOUD, error.to_string())?;
+                    attempt = 0;
+                    continue;
+                }
+                if self.check_destination_captcha(chrome).unwrap_or(false) {
+                    continue;
+                }
             }
-            if self.check_destination_captcha(chrome).unwrap_or(false) {
-                continue;
-            }
-            let delay = retry_delay(&error, attempt);
-            if let Some(seconds) = delay {
-                self.log("WARNING", &error.to_string());
+            self.log("WARNING", &error.to_string());
+            if let Some(seconds) = retry_delay(&error, attempt) {
                 self.work(&format!(
                     "Повторю поиск через {seconds} сек. Попытка {} из 3.",
                     attempt + 2
@@ -380,7 +389,9 @@ impl Job {
                 attempt += 1;
                 continue;
             }
-            self.log("WARNING", &error.to_string());
+            if rate_limited {
+                return Err(format!("{error} Исчерпаны 3 попытки поиска."));
+            }
             let reply = self.action(
                 "Поиск SoundCloud прерван",
                 &format!("{error} Проверьте вход и подключение к SoundCloud."),
@@ -518,13 +529,20 @@ impl Job {
     }
 
     fn choose_destination(&mut self, chrome: &mut Destination) -> Result<()> {
+        let can_create_public = matches!(chrome, Destination::Api(_));
         let mut choices = vec![];
         let mut error = None;
         loop {
-            let reply =
-                self.ask(json!({"kind": "destination", "options": choices, "error": error}))?;
+            let reply = self.ask(json!({
+                "kind": "destination", "options": choices, "error": error,
+                "canCreatePublic": can_create_public,
+            }))?;
             match reply.as_str() {
                 Some("new") => break,
+                Some("new-public") if can_create_public => {
+                    self.record.as_mut().unwrap().1.playlists[0].public = true;
+                    break;
+                }
                 Some("library") => {
                     self.work("Загружаю плейлисты SoundCloud…");
                     match chrome.library(&|| self.control.check()) {
@@ -567,6 +585,7 @@ impl Job {
                                     url: Some(details.url),
                                     occupied: Some(details.count),
                                     dedup_only: false,
+                                    public: false,
                                 };
                                 report.add_linked_parts(parts);
                                 report
@@ -847,15 +866,35 @@ impl Job {
     }
 
     fn connect_destination(&mut self, browser: Option<Chrome>) -> Result<Destination> {
+        let public = self.record.as_ref().unwrap().1.playlists[0].public;
+        let mut actions = vec![("Войти в SoundCloud", "api")];
+        if !public {
+            actions.push(("Работать через Chrome", "browser"));
+        }
         let choice = self.action(
             "Подключение к SoundCloud",
-            "Войдите в SoundCloud и разрешите MusicTransfer искать треки и изменять ваши плейлисты.",
-            &[("Войти в SoundCloud", "api"), ("Работать через Chrome", "browser")],
+            if public {
+                "Войдите в SoundCloud, чтобы продолжить перенос в публичный плейлист через API."
+            } else {
+                "Войдите в SoundCloud и разрешите MusicTransfer искать треки и изменять ваши плейлисты."
+            },
+            &actions,
         )?;
         if choice == "api" {
+            let mut recovery = vec![("Повторить вход", "retry")];
+            if !public {
+                recovery.push(("Работать через Chrome", "browser"));
+            }
+            recovery.push(("Остановить", "stop"));
             loop {
                 self.work("Ожидаю подтверждение входа в SoundCloud в браузере…");
-                let result = SoundCloud::connect(&|| self.control.check());
+                let events = self.events.clone();
+                let result = SoundCloud::connect(&|| self.control.check(), move |seconds| {
+                    let _ = events.send(json!({
+                        "kind": "working",
+                        "text": format!("Жду сброса лимита SoundCloud. Около {seconds} сек."),
+                    }));
+                });
                 self.control.check()?;
                 let report = &mut self.record.as_mut().unwrap().1;
                 let error = match result {
@@ -874,22 +913,17 @@ impl Job {
                     Err(error) => error,
                 };
                 match self
-                    .action(
-                        "Не удалось войти в SoundCloud",
-                        &error,
-                        &[
-                            ("Повторить вход", "retry"),
-                            ("Работать через Chrome", "browser"),
-                            ("Остановить", "stop"),
-                        ],
-                    )?
+                    .action("Не удалось войти в SoundCloud", &error, &recovery)?
                     .as_str()
                 {
                     Some("retry") => continue,
-                    Some("browser") => break,
+                    Some("browser") if !public => break,
                     _ => return Err(error),
                 }
             }
+        }
+        if public {
+            return Err(STOP.into());
         }
         self.login(browser)
             .map(|chrome| Destination::Browser(Box::new(chrome)))
@@ -1344,6 +1378,7 @@ impl Job {
                 url: None,
                 occupied: None,
                 dedup_only: false,
+                public: report.playlists[0].public,
             });
         }
         let part = report.playlists[part_index].clone();

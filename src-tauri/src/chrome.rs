@@ -31,6 +31,7 @@ use winreg::{HKCU, HKLM};
 use crate::report::{self, Part, Result, Track};
 
 pub const SOUNDCLOUD: &str = "https://soundcloud.com/discover";
+pub const SEARCH_INTERVAL: Duration = Duration::from_millis(1250);
 const DOM: &str = include_str!("chrome_dom.js");
 const DELAY: Duration = Duration::from_secs(1);
 const TICK: Duration = Duration::from_millis(200);
@@ -60,6 +61,8 @@ pub struct Search {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SearchFailure {
+    #[error("Поиск SoundCloud недоступен (HTTP 429).")]
+    RateLimited(Option<u64>),
     #[error("Поиск SoundCloud недоступен (HTTP {0}).")]
     Http(u16),
     #[error("SoundCloud показал проверку безопасности.")]
@@ -111,6 +114,7 @@ struct NetworkResponse {
     id: RequestId,
     url: String,
     status: u16,
+    retry_after: Option<u64>,
     challenge: bool,
 }
 
@@ -234,6 +238,7 @@ pub struct Chrome {
     response_stream: EventStream<EventResponseReceived>,
     requests: VecDeque<(RequestId, String, String)>,
     responses: VecDeque<NetworkResponse>,
+    next_search: Instant,
 }
 
 impl Chrome {
@@ -328,6 +333,7 @@ impl Chrome {
             response_stream,
             requests: VecDeque::new(),
             responses: VecDeque::new(),
+            next_search: Instant::now(),
         })
     }
 
@@ -350,11 +356,18 @@ impl Chrome {
                 self.responses.pop_front();
             }
             if let Ok(status) = u16::try_from(event.response.status) {
+                let headers = event.response.headers.inner();
                 self.responses.push_back(NetworkResponse {
                     id: event.request_id.clone(),
                     url: event.response.url.clone(),
                     status,
-                    challenge: challenge_response(status, event.response.headers.inner()),
+                    retry_after: headers.as_object().and_then(|headers| {
+                        headers
+                            .iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                            .and_then(|(_, value)| value.as_str()?.trim().parse().ok())
+                    }),
+                    challenge: challenge_response(status, headers),
                 });
             }
         }
@@ -389,8 +402,10 @@ impl Chrome {
 
     fn search_http_error(&self, url: &str) -> Option<SearchFailure> {
         self.responses.iter().find_map(|response| {
-            (response.url == url && response.status >= 400)
-                .then_some(SearchFailure::Http(response.status))
+            (response.url == url && response.status >= 400).then(|| match response.status {
+                429 => SearchFailure::RateLimited(response.retry_after),
+                status => SearchFailure::Http(status),
+            })
         })
     }
 
@@ -511,11 +526,24 @@ impl Chrome {
         query: &str,
         check: &impl Fn() -> Result<()>,
     ) -> std::result::Result<Search, SearchFailure> {
+        let next_search = self.next_search;
+        self.wait(
+            next_search.saturating_duration_since(Instant::now()),
+            check,
+            |_| Ok((Instant::now() >= next_search).then_some(())),
+        )
+        .map_err(SearchFailure::Browser)?;
         let mut url = Url::parse("https://soundcloud.com/search/sounds").unwrap();
         url.query_pairs_mut().append_pair("q", query);
+        self.next_search = Instant::now() + SEARCH_INTERVAL;
         self.search_start(url.as_str())?;
         let mut result = self
             .wait(Duration::from_secs(20), check, |chrome| {
+                if let Some(error @ SearchFailure::RateLimited(_)) =
+                    chrome.search_http_error(url.as_str())
+                {
+                    return Ok(Some(Err(error)));
+                }
                 let result: Option<Search> = chrome.dom("search", &[json!(query)])?;
                 if chrome.captcha()? {
                     return Ok(Some(Err(SearchFailure::Challenge)));
@@ -1009,6 +1037,7 @@ mod tests {
             url: None,
             occupied: None,
             dedup_only: false,
+            public: false,
         };
         assert!(!chrome.prepare(&candidate, &part, &|| Ok(())).unwrap());
         assert!(
@@ -1116,11 +1145,11 @@ mod tests {
                 .unwrap();
             let mut request = [0; 4096];
             connection.read(&mut request).unwrap();
-            connection.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/html\r\nContent-Length: 4\r\nConnection: close\r\n\r\nTest").unwrap();
+            connection.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 17\r\nContent-Type: text/html\r\nContent-Length: 4\r\nConnection: close\r\n\r\nTest").unwrap();
         });
         assert!(matches!(
             chrome.search_start(&url),
-            Err(SearchFailure::Http(429))
+            Err(SearchFailure::RateLimited(Some(17)))
         ));
         assert_eq!(chrome.address().unwrap(), url);
         server.join().unwrap();

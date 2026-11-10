@@ -54,6 +54,8 @@ pub struct Part {
     pub occupied: Option<usize>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dedup_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub public: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -207,6 +209,7 @@ impl Report {
                 url: self.playlist_url.clone(),
                 occupied: None,
                 dedup_only: false,
+                public: false,
             });
         }
     }
@@ -801,6 +804,7 @@ mod tests {
             created: true,
             occupied: Some(500),
             dedup_only: true,
+            public: false,
         };
         assert!(report.add_linked_parts(vec![part.clone()]));
         assert!(!report.add_linked_parts(vec![Part {

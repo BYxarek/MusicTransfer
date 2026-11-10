@@ -1,6 +1,6 @@
 {
   "name": "music-transfer",
-  "version": "2.3.0-alpha.7",
+  "version": "2.3.0-alpha.8",
   "private": true,
   "type": "module",
   "scripts": {

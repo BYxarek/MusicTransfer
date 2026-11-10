@@ -153,9 +153,10 @@ function DestinationPicker({ event, reply }) {
   const [url, setUrl] = useState('');
   return <>
     <h2>Куда перенести треки</h2>
-    <p>Создайте закрытый плейлист или добавьте треки в один из своих плейлистов SoundCloud.</p>
+    <p>Создайте {event.canCreatePublic ? 'закрытый или публичный' : 'закрытый'} плейлист или добавьте треки в один из своих плейлистов SoundCloud.</p>
     <div className="row">
       <Button kind="primary" icon={ListMusic} onClick={() => reply('new')}>Новый закрытый плейлист</Button>
+      {event.canCreatePublic && <Button icon={ListMusic} onClick={() => reply('new-public')}>Новый публичный плейлист</Button>}
       <Button icon={Cloud} onClick={() => reply('library')}>Загрузить мои плейлисты</Button>
     </div>
     {event.options.length > 0 && <div className="choices playlist-choices">
