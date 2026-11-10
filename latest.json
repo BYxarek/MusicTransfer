@@ -1,10 +1,10 @@
 {
-  "version": "2.3.0-alpha.5",
-  "notes": "Прямое чтение плейлистов Яндекс Музыки и перенос через официальный API SoundCloud.",
+  "version": "2.3.0-alpha.6",
+  "notes": "Поддержка ссылок Яндекс Музыки на плейлисты «Мне нравится» с префиксом lk.",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.5/MusicTransfer-2.3.0-alpha.5-x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YnpTcXFReW9Ka0NCUy95M2FTejJEUVdhSEpHSzA1cEFEcjhzb3A2TFMwNFExRmZNczRoTjl0VWdKeVg1VE94V0hRVmpML1JFcURvVVloM0FUS1JFK1FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzQwMDY1CWZpbGU6TXVzaWNUcmFuc2Zlci0yLjMuMC1hbHBoYS41LXg2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS41Ck1DaWhhVCt5ams4bnNRY1daN3RYSXBUUkUveEhYSVVkMGkvK0ttMXJpY0VYd3pqUXZsamhwVmJlSzdSKzQ4U2tXa2NsYTBVRHR5ZUM0aG8vdjdBcEJBPT0K"
+      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.6/MusicTransfer-2.3.0-alpha.6-x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YjQzNjhBUmJCZHR4ZU4ra0VISEVSZnhnWlVoSmF5Vk9uMXdHemVuRklleHpaV3QxTGg4YklxOGhnNUpVYkFjZzljRjljQWs3NGl0WE1QRjMzc3VaeXdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzQwNDUyCWZpbGU6TXVzaWNUcmFuc2Zlci0yLjMuMC1hbHBoYS42LXg2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS42CklLUjZHczZJN09oTUNYeklXK1hOQ3BIVHBUNW5QTFkyOC9kMFJjY3QzRkpnQi9ySk4xOXBwWHF5RmRqYWduRnEyQ3VnSHR6bldsK0h0OWVOOFJEM0R3PT0K"
     }
   }
 }
