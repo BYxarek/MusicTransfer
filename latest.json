@@ -1,10 +1,10 @@
 {
-  "version": "2.3.0-alpha.7",
-  "notes": "Исправлено чтение состава плейлистов SoundCloud. При добавлении и замене треков MusicTransfer запрашивает все категории доступа, включая треки, заблокированные для воспроизведения. Приложение сохраняет изменения только после проверки полноты списка.\n\nДля Windows x64 доступны установщик и переносимый EXE. Выпуск предназначен для альфа-канала обновлений.",
+  "version": "2.3.0-alpha.8",
+  "notes": "- В режиме API можно создавать публичные плейлисты SoundCloud и добавлять треки в свои публичные плейлисты.\n- Клиент выдерживает минимум 750 мс между вызовами API и 1,25 с между поисковыми запросами. При исчерпании квоты он ждёт её сброса.\n- При HTTP 429 поиск текущего трека автоматически повторяется. Если третья попытка вернула 429, перенос можно продолжить из истории.\n- В README описана настройка собственного приложения SoundCloud API.\n\nДля Windows x64 доступны установщик и переносимый EXE. Выпуск предназначен для альфа-канала обновлений.",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.7/MusicTransfer-2.3.0-alpha.7-x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YnpObVlNQUpFa2tjL2RBTDY1Y2RoalNBeTRCeWwxbmNtSlVsbGNodmhCSVEzdERSM1B6NGVaU0QrTkxsVVlPWENUVzRicEw4blFaMmloMlZFeGRCK0E0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzQyNzA3CWZpbGU6TXVzaWNUcmFuc2Zlci0yLjMuMC1hbHBoYS43LXg2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS43CnJ3dy9GaXV1R1NHTEZFU0pYdEUzVEhZVExZRjRLb3BrMk9YeUQ2b2doM1NSeWx1b1ZIVlhFVjNBTjdHeGRCS3JQaDlnTGg5UXl3b2ZoMXd5dmNoZ0R3PT0K"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YjBrTlZHc0I0aWpVc3JBNEJtNjluRzNyanBjY2hydncvWTRac1haYXBPdzU5NkNmOFRyelhyL2pNVGY0c1RkRnR6N2g0bnNwbWRRaWNkMFBBZURpMndBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzQ1NjE3CWZpbGU6TXVzaWNUcmFuc2Zlci0yLjMuMC1hbHBoYS44LXg2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS44Ckt0YUwvdWJYTjZzTGRkSy9TalpHUVNLYmN5SEI4RHh1cmFtajRnSXVxWnY2VWJFYlNsYTU0K29kdC8zNzNsK2ZTajZXRXJVZWsrbkpsMHlvS1FJd0RnPT0K",
+      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.8/MusicTransfer-2.3.0-alpha.8-x64-setup.exe"
     }
   }
 }
