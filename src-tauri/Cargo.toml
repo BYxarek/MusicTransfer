@@ -1,0 +1,34 @@
+[package]
+name = "music-transfer"
+version = "2.3.0-alpha.3"
+edition = "2024"
+rust-version = "1.95"
+
+[build-dependencies]
+tauri-build = { version = "=3.0.0-alpha.4", features = [] }
+
+[dependencies]
+arboard = { version = "3", default-features = false }
+chrono = { version = "0.4", features = ["clock"] }
+chromiumoxide = "=0.9.1"
+csv = "=1.4.0"
+futures-util = "0.3"
+log = "0.4"
+open = "5"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "=3.0.0-alpha.6", features = [] }
+tauri-runtime-wry = "=3.0.0-alpha.6"
+tauri-plugin-dialog = "=3.0.0-alpha.4"
+tauri-plugin-log = "=3.0.0-alpha.3"
+tauri-plugin-notification = "=3.0.0-alpha.3"
+tauri-plugin-single-instance = "=3.0.0-alpha.3"
+tauri-plugin-updater = "=3.0.0-alpha.3"
+tauri-plugin-window-state = "=3.0.0-alpha.2"
+tempfile = "3"
+thiserror = "=2.0.21"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+unicode-normalization = "0.1"
+url = "2"
+winreg = "0.56"
