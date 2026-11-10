@@ -1,10 +1,10 @@
 {
-  "version": "2.3.0-alpha.3",
-  "notes": "Первый публичный альфа-релиз. Экспорт CSV, восстановление переноса, уведомления Windows и обновления через GitHub.",
+  "version": "2.3.0-alpha.4",
+  "notes": "Удаление записей истории и улучшенная проверка капчи после добавления трека.",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.3/MusicTransfer-2.3.0-alpha.3-x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YjhKem05cEJ0Y0FGaXpsREZQVTdwWE5WS0o0U2txc0VqU2hkdlllOEJxMk52RzFwMG44S2RmeFQvbHFuSHRacDk5TklMSHJjbkNzK210Zm4rV3VFREFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzI2MTI3CWZpbGU6TXVzaWNUcmFuc2ZlciBBbHBoYV8yLjMuMC1hbHBoYS4zX3g2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS4zCm8zWFNlWGVMcnZUTXVFb0RGLzFzZmZadWpUQ1BLWmxZdkhYSVhmcXdHdk1qQXNuU0UydnNHZjNnemRkaVY5ZDhIRFZUN0Voa1Z2WklTbUFUVElPRUFBPT0K"
+      "url": "https://github.com/BYxarek/MusicTransfer/releases/download/v2.3.0-alpha.4/MusicTransfer-2.3.0-alpha.4-x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUUUh6Z3ovcUN4YnhnVENLY3VxZTdySnY2SnlFdTNZdmtkZVdESDZWSnBsVWZjVEpEcUZnSTZ2VStFWnltRUxhQXg3TjVPZ3hKcUw4a2RVYkpCc0RmOTJUcm5jc0hqc0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzI2Nzg5CWZpbGU6TXVzaWNUcmFuc2ZlciBBbHBoYV8yLjMuMC1hbHBoYS40X3g2NC1zZXR1cC5leGUJdmVyc2lvbjoyLjMuMC1hbHBoYS40CkFEV3lWVE1JcnBmQXNTZEJBaEpGVkp6RS9WREJyMWJGZUxlNStvckFxN3BsWkVGd1ZZTXpxMXljd2JhQTk1dDZHQmhGK1U2WU0wVGVEaFVCRjdLNEF3PT0K"
     }
   }
 }
