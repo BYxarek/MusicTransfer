@@ -59,7 +59,7 @@ fn endpoint(source: &Url) -> Option<Url> {
                 .ok()?
                 .extend(["users", user, "playlists", kind]);
         }
-        ["playlists", id] if identifier(id) => {
+        ["playlists", id] if identifier(id.strip_prefix("lk.").unwrap_or(id)) => {
             url.path_segments_mut().ok()?.extend(["playlist", id]);
         }
         _ => return None,
@@ -150,6 +150,22 @@ pub fn tracks(source: &Url) -> Result<(String, Vec<Track>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_the_liked_playlist_prefix_in_the_api_request() {
+        let url = Url::parse(
+            "https://music.yandex.by/playlists/lk.12345678-abcd-4321-abcd-123456789abc/?utm_source=share",
+        )
+        .unwrap();
+        assert_eq!(
+            endpoint(&url).unwrap().as_str(),
+            "https://api.music.yandex.net/playlist/lk.12345678-abcd-4321-abcd-123456789abc",
+        );
+        for id in ["lk.", "lk.bad%2Fid", "lk..id"] {
+            let url = Url::parse(&format!("https://music.yandex.by/playlists/{id}")).unwrap();
+            assert!(endpoint(&url).is_none());
+        }
+    }
 
     #[test]
     fn checks_completeness_before_removing_repeats() {
