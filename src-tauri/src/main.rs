@@ -2,9 +2,12 @@
 
 mod chrome;
 mod desktop;
+mod destination;
 mod matching;
 mod report;
+mod soundcloud;
 mod workflow;
+mod yandex;
 
 use std::sync::{
     Arc, Mutex,
@@ -209,6 +212,7 @@ fn copy_link(id: String) -> Result<()> {
 }
 
 fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let log = Arc::new(Log::new());
     log.write(
         "INFO",

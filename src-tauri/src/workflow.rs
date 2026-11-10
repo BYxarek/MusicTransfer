@@ -19,11 +19,14 @@ use tauri::ipc::Channel;
 
 use crate::{
     chrome::{self, Candidate, Chrome, SaveFailure, Search, SearchFailure},
+    destination::Destination,
     matching,
     report::{
         self, LIMIT, PENDING, Part, Replacement, ReplacementPhase, Report, Result, Track,
         UNCONFIRMED,
     },
+    soundcloud::SoundCloud,
+    yandex,
 };
 
 const STOP: &str = "Перенос остановлен.";
@@ -329,7 +332,26 @@ impl Job {
         }
     }
 
-    fn search_with_recovery(&mut self, chrome: &mut Chrome, query: &str) -> Result<Search> {
+    fn check_destination_captcha(&mut self, destination: &mut Destination) -> Result<bool> {
+        destination
+            .browser()
+            .map_or(Ok(false), |chrome| self.check_captcha(chrome))
+    }
+
+    fn recover_destination(
+        &mut self,
+        destination: &mut Destination,
+        address: &str,
+        reason: String,
+    ) -> Result<()> {
+        if let Some(chrome) = destination.browser() {
+            self.recover_chrome(chrome, address, reason)
+        } else {
+            Err(reason)
+        }
+    }
+
+    fn search_with_recovery(&mut self, chrome: &mut Destination, query: &str) -> Result<Search> {
         let mut attempt = 0;
         loop {
             self.control.check()?;
@@ -340,11 +362,11 @@ impl Job {
             };
             self.control.check()?;
             if chrome.disconnected() {
-                self.recover_chrome(chrome, chrome::SOUNDCLOUD, error.to_string())?;
+                self.recover_destination(chrome, chrome::SOUNDCLOUD, error.to_string())?;
                 attempt = 0;
                 continue;
             }
-            if self.check_captcha(chrome).unwrap_or(false) {
+            if self.check_destination_captcha(chrome).unwrap_or(false) {
                 continue;
             }
             let delay = retry_delay(&error, attempt);
@@ -361,7 +383,7 @@ impl Job {
             self.log("WARNING", &error.to_string());
             let reply = self.action(
                 "Поиск SoundCloud прерван",
-                &format!("{error} Проверьте вход или соединение в Chrome."),
+                &format!("{error} Проверьте вход и подключение к SoundCloud."),
                 &[("Повторить поиск", "retry"), ("Завершить попытку", "stop")],
             )?;
             if reply != "retry" {
@@ -495,7 +517,7 @@ impl Job {
         report::write(path, report)
     }
 
-    fn choose_destination(&mut self, chrome: &mut Chrome) -> Result<()> {
+    fn choose_destination(&mut self, chrome: &mut Destination) -> Result<()> {
         let mut choices = vec![];
         let mut error = None;
         loop {
@@ -515,7 +537,7 @@ impl Job {
                         Err(message) => {
                             self.control.check()?;
                             if chrome.disconnected() {
-                                self.recover_chrome(chrome, chrome::SOUNDCLOUD, message)?;
+                                self.recover_destination(chrome, chrome::SOUNDCLOUD, message)?;
                             } else {
                                 error = Some(message);
                             }
@@ -557,9 +579,9 @@ impl Job {
                         Err(message) => {
                             self.control.check()?;
                             if chrome.disconnected() {
-                                self.recover_chrome(chrome, chrome::SOUNDCLOUD, message)?;
+                                self.recover_destination(chrome, chrome::SOUNDCLOUD, message)?;
                             } else {
-                                self.check_captcha(chrome).ok();
+                                self.check_destination_captcha(chrome).ok();
                                 error = Some(message);
                             }
                         }
@@ -577,7 +599,7 @@ impl Job {
         self.save_record()
     }
 
-    fn refresh_existing(&mut self, chrome: &mut Chrome) -> Result<()> {
+    fn refresh_existing(&mut self, chrome: &mut Destination) -> Result<()> {
         let report = &self.record.as_ref().unwrap().1;
         if report.extra.get("existing_destination") != Some(&Value::Bool(true)) {
             return Ok(());
@@ -619,7 +641,7 @@ impl Job {
 
     fn verify_membership(
         &mut self,
-        chrome: &mut Chrome,
+        chrome: &mut Destination,
         track: Option<&str>,
         part: &mut Part,
     ) -> Result<Option<bool>> {
@@ -669,7 +691,7 @@ impl Job {
         }
     }
 
-    fn reconcile(&mut self, chrome: &mut Chrome, index: usize) -> Result<()> {
+    fn reconcile(&mut self, chrome: &mut Destination, index: usize) -> Result<()> {
         let (_, report) = self.record.as_ref().unwrap();
         let track = &report.tracks[index];
         let part_index = track.part_index().ok_or("Неверная часть плейлиста.")?;
@@ -757,7 +779,35 @@ impl Job {
         self.save_record()
     }
 
-    fn source(&mut self, url: &str) -> Result<Chrome> {
+    fn source(&mut self, url: &url::Url) -> Result<Option<Chrome>> {
+        self.work("Читаю плейлист через API Яндекс Музыки…");
+        let source = yandex::tracks(url);
+        self.control.check()?;
+        let ((title, tracks), browser) = match source {
+            Ok(source) => (source, None),
+            Err(error) => {
+                self.log("WARNING", &format!("{error} Открываю плейлист в Chrome."));
+                let (chrome, source) = self.source_in_chrome(url.as_str())?;
+                (source, Some(chrome))
+            }
+        };
+        let labels: Vec<_> = tracks.iter().map(|track| track.label()).collect();
+        self.ask(json!({"kind": "source", "title": title, "tracks": labels}))?;
+        let stamp = Local::now().format("%Y%m%d-%H%M%S-%6f").to_string();
+        let path = report::data_dir()?
+            .join("Reports")
+            .join(format!("перенос-{stamp}.json"));
+        let mut report = Report::new(url.as_str().into(), title, &stamp, tracks);
+        report
+            .extra
+            .insert("destination_pending".into(), json!(true));
+        report::write(&path, &mut report)?;
+        self.record = Some((path, report));
+        self.log("INFO", "Список треков сохранён для продолжения.");
+        Ok(browser)
+    }
+
+    fn source_in_chrome(&mut self, url: &str) -> Result<(Chrome, (String, Vec<Track>))> {
         let mut chrome = self.launch()?;
         if let Err(error) = chrome.navigate(url) {
             self.recover_chrome(&mut chrome, url, error)?;
@@ -777,7 +827,7 @@ impl Job {
             chrome.navigate(url)?;
         }
         self.work("Считываю треки из Яндекс Музыки…");
-        let (title, tracks) = loop {
+        let source = loop {
             match chrome.tracks(&|| self.control.check()) {
                 Ok(source) => break source,
                 Err(error) => {
@@ -793,20 +843,56 @@ impl Job {
                 }
             }
         };
-        let labels: Vec<_> = tracks.iter().map(|track| track.label()).collect();
-        self.ask(json!({"kind": "source", "title": title, "tracks": labels}))?;
-        let stamp = Local::now().format("%Y%m%d-%H%M%S-%6f").to_string();
-        let path = report::data_dir()?
-            .join("Reports")
-            .join(format!("перенос-{stamp}.json"));
-        let mut report = Report::new(url.into(), title, &stamp, tracks);
-        report
-            .extra
-            .insert("destination_pending".into(), json!(true));
-        report::write(&path, &mut report)?;
-        self.record = Some((path, report));
-        self.log("INFO", "Список треков сохранён для продолжения.");
-        Ok(chrome)
+        Ok((chrome, source))
+    }
+
+    fn connect_destination(&mut self, browser: Option<Chrome>) -> Result<Destination> {
+        let choice = self.action(
+            "Подключение к SoundCloud",
+            "Войдите в SoundCloud и разрешите MusicTransfer искать треки и изменять ваши плейлисты.",
+            &[("Войти в SoundCloud", "api"), ("Работать через Chrome", "browser")],
+        )?;
+        if choice == "api" {
+            loop {
+                self.work("Ожидаю подтверждение входа в SoundCloud в браузере…");
+                let result = SoundCloud::connect(&|| self.control.check());
+                self.control.check()?;
+                let report = &mut self.record.as_mut().unwrap().1;
+                let error = match result {
+                    Ok(api) => {
+                        let owner = report.extra.get("soundcloud_owner").and_then(Value::as_str);
+                        if owner.is_none_or(|owner| owner == api.owner) {
+                            report
+                                .extra
+                                .insert("soundcloud_owner".into(), json!(api.owner));
+                            self.save_record()?;
+                            return Ok(Destination::Api(Box::new(api)));
+                        }
+                        "Для продолжения войдите в аккаунт SoundCloud, с которого начали перенос."
+                            .into()
+                    }
+                    Err(error) => error,
+                };
+                match self
+                    .action(
+                        "Не удалось войти в SoundCloud",
+                        &error,
+                        &[
+                            ("Повторить вход", "retry"),
+                            ("Работать через Chrome", "browser"),
+                            ("Остановить", "stop"),
+                        ],
+                    )?
+                    .as_str()
+                {
+                    Some("retry") => continue,
+                    Some("browser") => break,
+                    _ => return Err(error),
+                }
+            }
+        }
+        self.login(browser)
+            .map(|chrome| Destination::Browser(Box::new(chrome)))
     }
 
     fn run(&mut self) -> Result<&'static str> {
@@ -864,10 +950,10 @@ impl Job {
                 .as_deref()
                 .and_then(report::source_url)
                 .ok_or("Вставьте HTTPS-ссылку на плейлист Яндекс Музыки.")?;
-            source_browser = Some(self.source(url.as_str())?);
+            source_browser = self.source(&url)?;
         }
 
-        let mut chrome = self.login(source_browser)?;
+        let mut chrome = self.connect_destination(source_browser)?;
         if self
             .record
             .as_ref()
@@ -979,7 +1065,12 @@ impl Job {
         )
     }
 
-    fn transfer_track(&mut self, chrome: &mut Chrome, index: usize, manual: bool) -> Result<()> {
+    fn transfer_track(
+        &mut self,
+        chrome: &mut Destination,
+        index: usize,
+        manual: bool,
+    ) -> Result<()> {
         let track = self.record.as_ref().unwrap().1.tracks[index].clone();
         let label = track.label();
         let mut query = track
@@ -1075,22 +1166,24 @@ impl Job {
             };
             self.work(&format!("Добавляю: {label}"));
             let method = if prompted { "manual" } else { "auto" };
-            let Some((part_index, part, already_added)) =
+            let Some((part_index, mut part, already_added)) =
                 self.prepare_destination(chrome, candidate)?
             else {
                 continue;
             };
             if !already_added {
-                self.pause(1)?;
+                if chrome.browser().is_some() {
+                    self.pause(1)?;
+                }
                 if chrome.disconnected() {
-                    self.recover_chrome(
+                    self.recover_destination(
                         chrome,
                         chrome::SOUNDCLOUD,
                         "Chrome закрылся до отправки.".into(),
                     )?;
                     continue;
                 }
-                if self.check_captcha(chrome)? {
+                if self.check_destination_captcha(chrome)? {
                     continue;
                 }
                 let target = &mut self.record.as_mut().unwrap().1.tracks[index];
@@ -1118,7 +1211,7 @@ impl Job {
                     );
                 }
                 self.save_record()?;
-                if let Err(failure) = chrome.save(&part, &|| self.control.check()) {
+                if let Err(failure) = chrome.save(&mut part, &|| self.control.check()) {
                     match failure {
                         SaveFailure::Challenge | SaveFailure::Unknown(_) => {
                             self.check_unknown(chrome, failure)?;
@@ -1142,10 +1235,12 @@ impl Job {
                 }
             }
             let report = &mut self.record.as_mut().unwrap().1;
-            report.playlists[part_index].created = true;
+            let destination = &mut report.playlists[part_index];
+            destination.created = true;
+            destination.url = part.url;
             if !already_added {
-                if let Some(occupied) = report.playlists[part_index].occupied.as_mut() {
-                    *occupied = occupied.saturating_add(1);
+                if let Some(occupied) = part.occupied.or(destination.occupied) {
+                    destination.occupied = Some(occupied.saturating_add(1));
                 }
             }
             let target = &mut report.tracks[index];
@@ -1177,13 +1272,13 @@ impl Job {
         }
     }
 
-    fn retry_action(&mut self, chrome: &mut Chrome, title: &str, error: String) -> Result<()> {
+    fn retry_action(&mut self, chrome: &mut Destination, title: &str, error: String) -> Result<()> {
         self.control.check()?;
         self.log("WARNING", &error);
         if chrome.disconnected() {
-            return self.recover_chrome(chrome, chrome::SOUNDCLOUD, error);
+            return self.recover_destination(chrome, chrome::SOUNDCLOUD, error);
         }
-        if self.check_captcha(chrome).unwrap_or(false) {
+        if self.check_destination_captcha(chrome).unwrap_or(false) {
             return Ok(());
         }
         let reply = self.action(
@@ -1197,7 +1292,7 @@ impl Job {
         if reply == "retry" { Ok(()) } else { Err(error) }
     }
 
-    fn check_unknown(&mut self, chrome: &mut Chrome, failure: SaveFailure) -> Result<()> {
+    fn check_unknown(&mut self, chrome: &mut Destination, failure: SaveFailure) -> Result<()> {
         self.control.check()?;
         let error = match failure {
             SaveFailure::Challenge => {
@@ -1205,30 +1300,37 @@ impl Job {
                     "WARNING",
                     "SoundCloud запросил проверку после отправки. Добавление ожидает сверки.",
                 );
-                return self.wait_for_captcha(chrome, true);
+                return chrome.browser().map_or_else(
+                    || Err("SoundCloud не подтвердил добавление.".into()),
+                    |browser| self.wait_for_captcha(browser, true),
+                );
             }
             SaveFailure::Unknown(error) | SaveFailure::Rejected(error) => error,
         };
         self.log("WARNING", &error);
         if chrome.disconnected() {
-            return self.recover_chrome(chrome, chrome::SOUNDCLOUD, error);
+            return self.recover_destination(chrome, chrome::SOUNDCLOUD, error);
         }
-        self.check_captcha(chrome)?;
+        self.check_destination_captcha(chrome)?;
         self.control.check()
     }
 
-    fn open_for_reconcile(&mut self, chrome: &mut Chrome, url: Option<&str>) -> Result<()> {
+    fn open_for_reconcile(&mut self, chrome: &mut Destination, url: Option<&str>) -> Result<()> {
         let url = url.unwrap_or("https://soundcloud.com/you/sets");
-        if let Err(error) = chrome.navigate(url) {
-            self.recover_chrome(chrome, url, error)?;
+        if let Some(browser) = chrome.browser() {
+            if let Err(error) = browser.navigate(url) {
+                self.recover_chrome(browser, url, error)?;
+            }
+            self.check_captcha(browser)?;
+        } else {
+            open::that(url).map_err(|_| "Не удалось открыть плейлист в браузере.".to_owned())?;
         }
-        self.check_captcha(chrome)?;
         Ok(())
     }
 
     fn prepare_destination(
         &mut self,
-        chrome: &mut Chrome,
+        chrome: &mut Destination,
         candidate: &Candidate,
     ) -> Result<Option<(usize, Part, bool)>> {
         let report = &mut self.record.as_mut().unwrap().1;
@@ -1308,13 +1410,13 @@ impl Job {
         Ok(Some((part_index, part, false)))
     }
 
-    fn review_track(&mut self, chrome: &mut Chrome, index: usize) -> Result<()> {
+    fn review_track(&mut self, chrome: &mut Destination, index: usize) -> Result<()> {
         let report = &self.record.as_ref().unwrap().1;
         let track = report.tracks[index].clone();
         let part_index = track
             .part_index()
             .ok_or("В отчёте нет номера части плейлиста.")?;
-        let part = report
+        let mut part = report
             .playlists
             .get(part_index)
             .ok_or("В отчёте отсутствует плейлист трека.")?
@@ -1376,16 +1478,18 @@ impl Job {
                 return Err("В этой части 500 треков. Для безопасной замены сначала освободите место, сохранив прежнюю версию.".into());
             }
             if !already_added {
-                self.pause(1)?;
+                if chrome.browser().is_some() {
+                    self.pause(1)?;
+                }
                 if chrome.disconnected() {
-                    self.recover_chrome(
+                    self.recover_destination(
                         chrome,
                         chrome::SOUNDCLOUD,
                         "Chrome закрылся до отправки.".into(),
                     )?;
                     continue;
                 }
-                if self.check_captcha(chrome)? {
+                if self.check_destination_captcha(chrome)? {
                     continue;
                 }
             }
@@ -1401,7 +1505,7 @@ impl Job {
             };
             self.save_replacement(index, Some(&replacement))?;
             if !already_added {
-                match chrome.save(&part, &|| self.control.check()) {
+                match chrome.save(&mut part, &|| self.control.check()) {
                     Ok(()) => {
                         replacement.phase = ReplacementPhase::RemovePrevious;
                         self.save_replacement(index, Some(&replacement))?;
@@ -1428,7 +1532,7 @@ impl Job {
         self.save_record()
     }
 
-    fn finish_replacement(&mut self, chrome: &mut Chrome, index: usize) -> Result<()> {
+    fn finish_replacement(&mut self, chrome: &mut Destination, index: usize) -> Result<()> {
         let report = &self.record.as_ref().unwrap().1;
         let track = &report.tracks[index];
         let Some(mut replacement) = track.replacement() else {

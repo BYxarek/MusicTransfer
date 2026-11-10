@@ -2399,18 +2399,23 @@ dependencies = [
 
 [[package]]
 name = "music-transfer"
-version = "2.3.0-alpha.4"
+version = "2.3.0-alpha.5"
 dependencies = [
  "arboard",
+ "base64 0.23.1",
  "chromiumoxide",
  "chrono",
  "csv",
  "futures-util",
  "log",
  "open",
+ "rand",
  "regex",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3299,6 +3304,7 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

@@ -1,6 +1,6 @@
 [package]
 name = "music-transfer"
-version = "2.3.0-alpha.4"
+version = "2.3.0-alpha.5"
 edition = "2024"
 rust-version = "1.95"
 
@@ -9,15 +9,20 @@ tauri-build = { version = "=3.0.0-alpha.4", features = [] }
 
 [dependencies]
 arboard = { version = "3", default-features = false }
+base64 = "0.23"
 chrono = { version = "0.4", features = ["clock"] }
 chromiumoxide = "=0.9.1"
 csv = "=1.4.0"
 futures-util = "0.3"
 log = "0.4"
 open = "5"
+rand = "0.9"
 regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "=3.0.0-alpha.6", features = [] }
 tauri-runtime-wry = "=3.0.0-alpha.6"
 tauri-plugin-dialog = "=3.0.0-alpha.4"
